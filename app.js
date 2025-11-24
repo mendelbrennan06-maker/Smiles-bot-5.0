@@ -1,6 +1,6 @@
-// app.js - Simplified Smiles Bot with Test Endpoint (No Crashes)
+// app.js - Smiles Bot: Home Page + Dynamic Form Load (Final Nov 2025)
 import express from "express";
-import fetch from "node-fetch";
+import puppeteer from "puppeteer";
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -27,93 +27,118 @@ function to12Hour(time24) {
   return `\( {hh12}: \){String(mm).padStart(2, "0")}${period}`;
 }
 
-// Fallback mock data for testing (replace with real API when ready)
-async function getMockAwards(origin, dest, dateISO) {
-  // Mock real data for JFK-GRU 2025-12-20 (based on current availability)
-  return [
-    {
-      airline: "GOL",
-      originCode: "JFK",
-      destCode: "GRU",
-      dep: "08:00",
-      arr: "05:30",
-      econPts: 25000,
-      busPts: 50000,
-      taxesBRL: 800,
-    },
-    {
-      airline: "GOL",
-      originCode: "JFK",
-      destCode: "GRU",
-      dep: "14:30",
-      arr: "12:00",
-      econPts: 30000,
-      busPts: null,
-      taxesBRL: 650,
-    }
-  ];
-}
-
-// Real scraper placeholder (add back when selectors are stable)
+// Robust scraper: Home page + dynamic wait for form
 async function scrapeSmiles(origin, dest, dateISO) {
-  // For now, use mock — replace with Puppeteer when ready
-  if (origin === "JFK" && dest === "GRU" && dateISO === "2025-12-20") {
-    return await getMockAwards(origin, dest, dateISO);
+  const browser = await puppeteer.launch({
+    headless: "new",
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-web-security",
+    ],
+  });
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1366, height: 768 });
+  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+
+  try {
+    // Start at home page (form is embedded)
+    await page.goto("https://www.smiles.com.br", { waitUntil: "networkidle2", timeout: 30000 });
+
+    // Wait for form to load dynamically (generic selector for any input with placeholder)
+    await page.waitForFunction(() => {
+      const inputs = document.querySelectorAll("input[placeholder*='Origem'], input[placeholder*='de onde'], input[type='text']");
+      return inputs.length > 0;
+    }, { timeout: 15000 });
+
+    // Fill origin (generic input)
+    const originInput = await page.$("input[placeholder*='Origem'], input[placeholder*='de onde'], input[type='text']:first-of-type");
+    if (originInput) {
+      await originInput.type(origin);
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(1500);
+    }
+
+    // Fill destination (next input)
+    const destInput = await page.$("input[placeholder*='Destino'], input[placeholder*='para onde'], input[type='text']:nth-of-type(2)");
+    if (destInput) {
+      await destInput.type(dest);
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(1500);
+    }
+
+    // Fill date (date input)
+    const dateInput = await page.$("input[placeholder*='Data'], input[placeholder*='ida'], input[type='date']");
+    if (dateInput) {
+      await dateInput.type(dateISO);
+      await page.waitForTimeout(1000);
+    }
+
+    // Submit (generic button)
+    const submitBtn = await page.$("button[type='submit'], button[class*='search'], button[class*='buscar'], button[class*='btn']");
+    if (submitBtn) {
+      await submitBtn.click();
+      await page.waitForTimeout(5000);
+    }
+
+    // Wait for results (generic selector)
+    await page.waitForSelector(".result, .flight, .no-results, div[class*='result']", { timeout: 30000 });
+
+    // Check if no results
+    const hasResults = await page.evaluate(() => !!document.querySelector(".result, .flight, div[class*='result'] > div"));
+    if (!hasResults) return [];
+
+    // Extract flights (generic selectors)
+    const flights = await page.evaluate(() => {
+      const rows = document.querySelectorAll(".result, .flight, div[class*='result'] > div");
+      return Array.from(rows).map(row => {
+        const airline = row.querySelector(".airline, .carrier, .company")?.innerText?.trim() || "GOL";
+        const dep = row.querySelector(".dep, .departure")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
+        const arr = row.querySelector(".arr, .arrival")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
+        const econText = row.querySelector(".econ, .economy")?.innerText || "";
+        const busText = row.querySelector(".bus, .business")?.innerText || "";
+        const econPts = econText.match(/(\d{1,5})/)?.[1] ? parseInt(econText.match(/(\d{1,5})/)[1]) : null;
+        const busPts = busText.match(/(\d{1,5})/)?.[1] ? parseInt(busText.match(/(\d{1,5})/)[1]) : null;
+        const taxesText = row.querySelector(".tax, .fee")?.innerText || "";
+        let taxesBRL = 0;
+        const match = taxesText.match(/R\$\s*([\d.,]+)/i);
+        if (match) {
+          taxesBRL = parseFloat(match[1].replace(/\./g, '').replace(',', '.'));
+        }
+
+        return { airline, dep, arr, econPts, busPts, taxesBRL };
+      }).filter(f => f.econPts || f.busPts);
+    });
+
+    return flights;
+  } catch (e) {
+    console.error("Scrape error:", e.message);
+    return [];
+  } finally {
+    await browser.close();
   }
-  return [];
 }
 
 function buildResponse({ flights, maxPoints = Infinity }) {
   const valid = flights.filter(f => Math.min(f.econPts || Infinity, f.busPts || Infinity) <= maxPoints);
   if (!valid.length) return "No award space found under your max points.";
 
-  const both = valid.filter(f => f.econPts && f.busPts);
-  const econOnly = valid.filter(f => f.econPts && !f.busPts);
-  const busOnly = valid.filter(f => !f.econPts && f.busPts);
-
-  function sortByDep(arr) {
-    return arr.sort((a, b) => a.dep.localeCompare(b.dep));
-  }
-
-  const sections = [
-    { title: "Both Economy & Business", items: sortByDep(both) },
-    { title: "Economy only", items: sortByDep(econOnly) },
-    { title: "Business only", items: sortByDep(busOnly) },
-  ];
-
   let out = "";
-  sections.forEach(sec => {
-    if (!sec.items.length) return;
-    out += `=== ${sec.title} ===\n`;
+  valid.forEach(f => {
+    const dep12 = to12Hour(f.dep);
+    const arr12 = to12Hour(f.arr);
+    const econ = f.econPts ? `${f.econPts}` : "-";
+    const bus = f.busPts ? `${f.busPts}` : "-";
+    const taxesUSD = f.taxesBRL ? brlToUsd(f.taxesBRL) : "-";
+    const lowestPts = econ !== "-" ? econ : bus;
 
-    const byOriginAirline = {};
-    sec.items.forEach(f => {
-      const key = `\( {f.originCode}- \){f.airline}`;
-      byOriginAirline[key] = byOriginAirline[key] || [];
-      byOriginAirline[key].push(f);
-    });
-
-    Object.entries(byOriginAirline).forEach(([key, list]) => {
-      const [origin, airline] = key.split("-");
-      out += `\n\( {airline} from \){origin}:\n`;
-      list.forEach(f => {
-        const dep12 = to12Hour(f.dep);
-        const arr12 = to12Hour(f.arr);
-        const econ = f.econPts ? `${f.econPts}` : "-";
-        const bus = f.busPts ? `${f.busPts}` : "-";
-        const taxesUSD = f.taxesBRL ? brlToUsd(f.taxesBRL) : "-";
-        const lowestPts = econ !== "-" ? econ : bus;
-
-        out += `\( {origin} \){dep12} - \( {f.destCode} \){arr12}\n`;
-        out += `  Economy pts: \( {econ} | Business pts: \){bus}\n`;
-        out += `  1=${lowestPts} (points)  2=\[ {taxesUSD} (USD taxes)\n`;
-        if (f.econPts) out += `    (points value est: \]{ptsValueUsd(f.econPts).toFixed(2)})\n`;
-        if (f.busPts) out += `    (points value est: $${ptsValueUsd(f.busPts).toFixed(2)})\n`;
-      });
-    });
-    out += "\n";
+    out += `JFK \( {dep12} - GRU \){arr12}\n`;
+    out += `  Economy pts: \( {econ} | Business pts: \){bus}\n`;
+    out += `  1=${lowestPts} (points)  2=\[ {taxesUSD} (USD taxes)\n`;
+    if (f.econPts) out += `    (points value est: \]{ptsValueUsd(f.econPts).toFixed(2)})\n`;
+    if (f.busPts) out += `    (points value est: $${ptsValueUsd(f.busPts).toFixed(2)})\n\n`;
   });
-
   return out;
 }
 
@@ -144,14 +169,9 @@ app.post("/whatsapp-webhook", async (req, res) => {
     `.trim());
   } catch (err) {
     console.error(err);
-    res.type("text/xml").send("<Response><Message>Sorry, something went wrong. Try again later.</Message></Response>");
+    res.type("text/xml").send("<Response><Message>Sorry, try again later.</Message></Response>");
   }
 });
 
-// Test endpoint to verify server is alive
-app.get("/test", (req, res) => {
-  res.send("Bot is alive! Try 'NYC-GRU 2025-12-20' in WhatsApp.");
-});
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Smiles WhatsApp Bot running on", PORT));
+app.listen(PORT, () => console.log("Smiles Bot running on", PORT));
