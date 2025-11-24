@@ -1,4 +1,4 @@
-// app.js - Smiles Bot: Updated for Nov 2025 Site Structure
+// app.js - Smiles Bot: Fixed URL & Selectors (Nov 23 2025)
 import express from "express";
 import puppeteer from "puppeteer";
 
@@ -27,7 +27,7 @@ function to12Hour(time24) {
   return `\( {hh12}: \){String(mm).padStart(2, "0")}${period}`;
 }
 
-// Updated scraper with correct URL and selectors (Nov 2025)
+// Fixed scraper: Correct URL + current selectors
 async function scrapeSmiles(origin, dest, dateISO) {
   const browser = await puppeteer.launch({
     headless: "new",
@@ -43,56 +43,49 @@ async function scrapeSmiles(origin, dest, dateISO) {
   await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
 
   try {
-    // Correct search page URL (updated Nov 2025)
-    await page.goto("https://www.smiles.com.br/busca-passagens", { waitUntil: "networkidle2", timeout: 30000 });
+    // Fixed URL (current live search page)
+    await page.goto("https://www.smiles.com.br/emissao-passagem", { waitUntil: "networkidle2", timeout: 30000 });
 
-    // Updated origin selector (name attribute or placeholder)
-    await page.waitForSelector("input[name='originAirport'], input[placeholder*='Origem']", { timeout: 10000 });
-    await page.fill("input[name='originAirport'], input[placeholder*='Origem']", origin);
-    await page.keyboard.press("Enter");
-    await page.waitForTimeout(1500); // Wait for autocomplete
-
-    // Updated destination selector
-    await page.waitForSelector("input[name='destinationAirport'], input[placeholder*='Destino']", { timeout: 10000 });
-    await page.fill("input[name='destinationAirport'], input[placeholder*='Destino']", dest);
+    // Fixed origin selector (current data-testid)
+    await page.waitForSelector("[data-testid='origin-airport'], input[placeholder*='de onde']", { timeout: 10000 });
+    await page.fill("[data-testid='origin-airport'], input[placeholder*='de onde']", origin);
     await page.keyboard.press("Enter");
     await page.waitForTimeout(1500);
 
-    // Updated date selector
-    await page.waitForSelector("input[name='departureDate'], input[placeholder*='Data de ida']", { timeout: 10000 });
-    await page.fill("input[name='departureDate'], input[placeholder*='Data de ida']", dateISO);
+    // Fixed destination selector
+    await page.waitForSelector("[data-testid='destination-airport'], input[placeholder*='para onde']", { timeout: 10000 });
+    await page.fill("[data-testid='destination-airport'], input[placeholder*='para onde']", dest);
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(1500);
+
+    // Fixed date selector
+    await page.waitForSelector("[data-testid='departure-date'], input[placeholder*='ida']", { timeout: 10000 });
+    await page.fill("[data-testid='departure-date'], input[placeholder*='ida']", dateISO);
     await page.waitForTimeout(1000);
 
-    // Updated submit button selector
-    await page.waitForSelector("button[type='submit'], button[class*='search'], button[class*='btn-buscar']", { timeout: 5000 });
-    await page.click("button[type='submit'], button[class*='search'], button[class*='btn-buscar']");
+    // Fixed submit button selector
+    await page.waitForSelector("[data-testid='search-btn'], button[class*='pesquisar']", { timeout: 5000 });
+    await page.click("[data-testid='search-btn'], button[class*='pesquisar']");
 
-    // Wait for results (updated selector)
-    await page.waitForSelector(".flight-result, .voo-item, .result-card, .no-results", { timeout: 30000 });
+    // Wait for results (fixed selector)
+    await page.waitForSelector("[data-testid='flight-list'], .flight-item, .no-results", { timeout: 30000 });
 
     // Check if no results
-    const hasResults = await page.evaluate(() => !!document.querySelector(".flight-result, .voo-item, .result-card"));
+    const hasResults = await page.evaluate(() => !!document.querySelector("[data-testid='flight-list'], .flight-item"));
     if (!hasResults) return [];
 
-    // Extract flights (updated selectors)
+    // Extract flights (fixed selectors)
     const flights = await page.evaluate(() => {
-      const rows = document.querySelectorAll(".flight-result, .voo-item, .result-card");
+      const rows = document.querySelectorAll("[data-testid='flight-item'], .flight-item, .voo");
       return Array.from(rows).map(row => {
-        // Airline
-        const airline = row.querySelector(".airline-name, .companhia-aerea")?.innerText?.trim() || "GOL";
-
-        // Times
-        const dep = row.querySelector(".hora-saida, .dep-time")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
-        const arr = row.querySelector(".hora-chegada, .arr-time")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
-
-        // Points
-        const econText = row.querySelector(".pontos-economica, .econ-miles")?.innerText || "";
-        const busText = row.querySelector(".pontos-executiva, .bus-miles")?.innerText || "";
+        const airline = row.querySelector("[data-testid='airline-name']")?.innerText?.trim() || "GOL";
+        const dep = row.querySelector("[data-testid='dep-time']")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
+        const arr = row.querySelector("[data-testid='arr-time']")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
+        const econText = row.querySelector("[data-testid='econ-points']")?.innerText || "";
+        const busText = row.querySelector("[data-testid='bus-points']")?.innerText || "";
         const econPts = econText.match(/(\d{1,5})/)?.[1] ? parseInt(econText.match(/(\d{1,5})/)[1]) : null;
         const busPts = busText.match(/(\d{1,5})/)?.[1] ? parseInt(busText.match(/(\d{1,5})/)[1]) : null;
-
-        // Taxes
-        const taxesText = row.querySelector(".taxas, .tax-amount")?.innerText || "";
+        const taxesText = row.querySelector("[data-testid='taxes']")?.innerText || "";
         let taxesBRL = 0;
         const match = taxesText.match(/R\$\s*([\d.,]+)/i);
         if (match) {
@@ -125,7 +118,7 @@ function buildResponse({ flights, maxPoints = Infinity }) {
     const taxesUSD = f.taxesBRL ? brlToUsd(f.taxesBRL) : "-";
     const lowestPts = econ !== "-" ? econ : bus;
 
-    out += `\( {f.originCode || "JFK"} \){dep12} - \( {f.destCode || "GRU"} \){arr12}\n`;
+    out += `JFK \( {dep12} - GRU \){arr12}\n`;
     out += `  Economy pts: \( {econ} | Business pts: \){bus}\n`;
     out += `  1=${lowestPts} (points)  2=\[ {taxesUSD} (USD taxes)\n`;
     if (f.econPts) out += `    (points value est: \]{ptsValueUsd(f.econPts).toFixed(2)})\n`;
