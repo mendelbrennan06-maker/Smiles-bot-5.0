@@ -1,4 +1,4 @@
-// app.js - Smiles Bot: Real Browser Scraping (Works Nov 2025)
+// app.js - Smiles Bot: Full Browser Simulation (Works Nov 2025)
 import express from "express";
 import puppeteer from "puppeteer";
 
@@ -27,59 +27,65 @@ function to12Hour(time24) {
   return `\( {hh12}: \){String(mm).padStart(2, "0")}${period}`;
 }
 
-// Real browser scraping: Navigate, fill form, extract results
+// Full browser flow: Home page → form fill → scrape results
 async function scrapeSmiles(origin, dest, dateISO) {
   const browser = await puppeteer.launch({
     headless: "new",
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-web-security",
+      "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ],
   });
   const page = await browser.newPage();
   await page.setViewport({ width: 1366, height: 768 });
-  await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
 
   try {
-    // Go to Smiles home/search page
-    await page.goto("https://www.smiles.com.br/emissao-passagem", { waitUntil: "networkidle2", timeout: 30000 });
+    // Start at home page
+    await page.goto("https://www.smiles.com.br", { waitUntil: "networkidle2", timeout: 30000 });
+
+    // Click search link
+    await page.waitForSelector("a[href*='emissao-passagem'], button[data-testid='search-flights']", { timeout: 10000 });
+    await page.click("a[href*='emissao-passagem'], button[data-testid='search-flights']");
+    await page.waitForTimeout(2000);
 
     // Fill origin
-    await page.waitForSelector("input[placeholder*='Origem'], input[data-testid='origin']", { timeout: 10000 });
-    await page.fill("input[placeholder*='Origem'], input[data-testid='origin']", origin);
+    await page.waitForSelector("input[placeholder*='Origem'], input[data-testid='origin-input']", { timeout: 10000 });
+    await page.fill("input[placeholder*='Origem'], input[data-testid='origin-input']", origin);
     await page.keyboard.press("Enter");
     await page.waitForTimeout(1000);
 
     // Fill destination
-    await page.fill("input[placeholder*='Destino'], input[data-testid='destination']", dest);
+    await page.fill("input[placeholder*='Destino'], input[data-testid='destination-input']", dest);
     await page.keyboard.press("Enter");
     await page.waitForTimeout(1000);
 
     // Fill date
-    await page.fill("input[placeholder*='Data'], input[data-testid='date']", dateISO);
+    await page.fill("input[placeholder*='Ida'], input[data-testid='departure-date']", dateISO);
     await page.waitForTimeout(1000);
 
     // Submit
-    await page.click("button[type='submit'], button[data-testid='search']");
-    await page.waitForTimeout(5000); // Load results
+    await page.click("button[type='submit'], button[data-testid='search-button']");
+    await page.waitForTimeout(5000);
 
-    // Wait for results or "no results"
-    try {
-      await page.waitForSelector(".no-results, .flight-list, .result-item", { timeout: 20000 });
-    } catch {
-      return []; // No results
-    }
+    // Wait for results
+    await page.waitForSelector(".flight-card, .result-item, .no-results", { timeout: 30000 });
 
-    // Extract
+    // Extract flights
     const flights = await page.evaluate(() => {
-      const rows = document.querySelectorAll(".flight-list .result-item, .award-flight");
+      const rows = document.querySelectorAll(".flight-card, .result-item");
       return Array.from(rows).map(row => {
-        const airline = row.querySelector(".airline")?.innerText?.trim() || "GOL";
-        const depTime = row.querySelector(".departure-time")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
-        const arrTime = row.querySelector(".arrival-time")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
-        const econPts = row.querySelector(".economy-points")?.innerText?.match(/(\d+)/)?.[1] || null;
-        const busPts = row.querySelector(".business-points")?.innerText?.match(/(\d+)/)?.[1] || null;
+        const airline = row.querySelector(".airline-name")?.innerText?.trim() || "GOL";
+        const dep = row.querySelector(".dep-time")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
+        const arr = row.querySelector(".arr-time")?.innerText?.match(/(\d{1,2}:\d{2})/)?.[1] || "";
+        const econPts = row.querySelector(".econ-points")?.innerText?.match(/(\d+)/)?.[1] || null;
+        const busPts = row.querySelector(".bus-points")?.innerText?.match(/(\d+)/)?.[1] || null;
         const taxesText = row.querySelector(".taxes")?.innerText || "";
         const taxesBRL = parseFloat(taxesText.replace(/[^\d,]/g, '').replace(',', '.')) || 0;
 
-        return { airline, dep: depTime, arr: arrTime, econPts: parseInt(econPts), busPts: parseInt(busPts), taxesBRL };
+        return { airline, dep, arr, econPts: parseInt(econPts), busPts: parseInt(busPts), taxesBRL };
       }).filter(f => f.econPts || f.busPts);
     });
 
@@ -103,11 +109,11 @@ function buildResponse({ flights, maxPoints = Infinity }) {
     const econ = f.econPts ? `${f.econPts}` : "-";
     const bus = f.busPts ? `${f.busPts}` : "-";
     const taxesUSD = f.taxesBRL ? brlToUsd(f.taxesBRL) : "-";
-    const lowest = econ !== "-" ? econ : bus;
+    const lowestPts = econ !== "-" ? econ : bus;
 
-    out += `JFK \( {dep12} - GRU \){arr12}\n`;
+    out += `\( {f.origin || "JFK"} \){dep12} - \( {f.dest || "GRU"} \){arr12}\n`;
     out += `  Economy pts: \( {econ} | Business pts: \){bus}\n`;
-    out += `  1=${lowest} (points)  2=\[ {taxesUSD} (USD taxes)\n`;
+    out += `  1=${lowestPts} (points)  2=\[ {taxesUSD} (USD taxes)\n`;
     if (f.econPts) out += `    (points value est: \]{ptsValueUsd(f.econPts).toFixed(2)})\n`;
     if (f.busPts) out += `    (points value est: $${ptsValueUsd(f.busPts).toFixed(2)})\n\n`;
   });
